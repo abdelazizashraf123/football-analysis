@@ -1,0 +1,254 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "a229a555",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import cv2\n",
+    "import numpy as np\n",
+    "import sys\n",
+    "from ultralytics import YOLO\n",
+    "from sklearn.cluster import KMeans"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "34cb165a",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_grass_color(img):\n",
+    "    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)\n",
+    "\n",
+    "    lower_green = np.array([30, 40, 40])\n",
+    "    upper_green = np.array([80, 255, 255])\n",
+    "\n",
+    "    mask = cv2.inRange(hsv, lower_green, upper_green)\n",
+    "\n",
+    "    masked_img = cv2.bitwise_and(img, img, mask=mask)\n",
+    "    grass_color = cv2.mean(img, mask=mask)\n",
+    "    return grass_color[:3]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "fd370129",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_players_boxes(result):\n",
+    "    players_imgs = []\n",
+    "    players_boxes = []\n",
+    "    goal = [] \n",
+    "    ball = []\n",
+    "    for box in result.boxes:\n",
+    "        label = int(box.cls.numpy()[0])\n",
+    "        if label == 0:\n",
+    "            x1, y1, x2, y2 = map(int, box.xyxy[0].numpy())\n",
+    "            player_img = result.orig_img[y1: y2, x1: x2]\n",
+    "            players_imgs.append(player_img)\n",
+    "            players_boxes.append(box)\n",
+    "        if label == 1:\n",
+    "            goal.append(box)\n",
+    "        if label == 2:\n",
+    "            ball.append(box)\n",
+    "    return players_imgs, players_boxes ,goal ,ball"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "9400f31f",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_kits_colors(players, grass_hsv=None, frame=None):\n",
+    "    kits_colors = []\n",
+    "    if grass_hsv is None:\n",
+    "        grass_color = get_grass_color(frame)\n",
+    "        grass_hsv = cv2.cvtColor(np.uint8([[list(grass_color)]]), cv2.COLOR_BGR2HSV)\n",
+    "    for player_img in players:\n",
+    "        hsv = cv2.cvtColor(player_img, cv2.COLOR_BGR2HSV)\n",
+    "\n",
+    "        lower_green = np.array([grass_hsv[0, 0, 0] - 10, 40, 40])\n",
+    "        upper_green = np.array([grass_hsv[0, 0, 0] + 10, 255, 255])\n",
+    "\n",
+    "        mask = cv2.inRange(hsv, lower_green, upper_green)\n",
+    "\n",
+    "        mask = cv2.bitwise_not(mask)\n",
+    "        upper_mask = np.zeros(player_img.shape[:2], np.uint8)\n",
+    "        upper_mask[0:player_img.shape[0]//2, 0:player_img.shape[1]] = 255\n",
+    "        mask = cv2.bitwise_and(mask, upper_mask)\n",
+    "\n",
+    "        kit_color = np.array(cv2.mean(player_img, mask=mask)[:3])\n",
+    "\n",
+    "        kits_colors.append(kit_color)\n",
+    "    return kits_colors"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "64affbbe",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_kits_classifier(kits_colors):\n",
+    "    kits_kmeans = KMeans(n_clusters=2, n_init=10)\n",
+    "    kits_kmeans.fit(kits_colors);\n",
+    "    return kits_kmeans"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "bd04c779",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def classify_kits(kits_classifer, kits_colors):\n",
+    "    team = kits_classifer.predict(kits_colors)\n",
+    "    return team"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e92ce7e5",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def calculate_distance(box1, box2):\n",
+    "    center1 = np.array([(box1['x'] + box1['w']) / 2, (box1['y'] + box1['h']) / 2])\n",
+    "    center2 = np.array([(box2['x'] + box2['w']) / 2, (box2['y'] + box2['h']) / 2])\n",
+    "    distance = np.linalg.norm(center1 - center2)\n",
+    "    return distance"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "de9aaf25",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_nearset_players(players_boxes, goal, kits_clf, img, grass_hsv):\n",
+    "    \n",
+    "    x1_gk, y1_gk, x2_gk, y2_gk = map(int, goal[0].xyxy[0].numpy())\n",
+    "    goal_box = {'x': x1_gk, 'y': y1_gk, 'w': x2_gk , 'h': y2_gk }\n",
+    "    players_distances = []\n",
+    "    \n",
+    "    for player in players_boxes:\n",
+    "        x1, y1, x2, y2 = map(int, player.xyxy[0].numpy())\n",
+    "        player_box = {'x': x1, 'y': y1, 'w': x2 , 'h': y2 }\n",
+    "        \n",
+    "        distance_to_goal = calculate_distance(goal_box, player_box)\n",
+    "        \n",
+    "        players_distances.append({\n",
+    "            'box': player.xyxy[0].numpy(),\n",
+    "            'distance': distance_to_goal,\n",
+    "        })\n",
+    "\n",
+    "    players_distances.sort(key=lambda player: player['distance'])\n",
+    "\n",
+    "    for player in players_distances:\n",
+    "        kit_color = get_kits_colors([img[int(player['box'][1]): int(player['box'][3]), int(player['box'][0]): int(player['box'][2])]], grass_hsv)\n",
+    "        player['team'] = classify_kits(kits_clf, kit_color)\n",
+    "\n",
+    "    team_1_players = [player for player in players_distances if player['team'] == 0]\n",
+    "    team_2_players = [player for player in players_distances if player['team'] == 1]\n",
+    "    \n",
+    "    nearest_player_team_1 = team_1_players[0] if team_1_players else None\n",
+    "    nearest_player_team_2 = team_2_players[0] if team_2_players else None\n",
+    "    return nearest_player_team_1, nearest_player_team_2"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "02208f00",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def annotate_image(img , model, color):\n",
+    "    kits_clf = None\n",
+    "    grass_hsv = None\n",
+    "    \n",
+    "    result = model(img, verbose=False)[0]\n",
+    "    img = result.orig_img.copy()\n",
+    "    \n",
+    "    players_imgs, players_boxes , goal , ball = get_players_boxes(result)\n",
+    "    \n",
+    "    kits_colors = get_kits_colors(players_imgs, grass_hsv, img)\n",
+    "    kits_clf = get_kits_classifier(kits_colors)\n",
+    "    \n",
+    "    grass_color = get_grass_color(result.orig_img)\n",
+    "    grass_hsv = cv2.cvtColor(np.uint8([[list(grass_color)]]), cv2.COLOR_BGR2HSV)\n",
+    "    \n",
+    "    team_1, team_2 = get_nearset_players(players_boxes, goal, kits_clf , img, grass_hsv)\n",
+    "    x1, y1, x2, y2 = map(int, ball[0].xyxy[0].numpy())\n",
+    "    \n",
+    "    cv2.rectangle(img, (int(team_1['box'][0]), int(team_1['box'][1])), (int(team_1['box'][2]), int(team_1['box'][3])), color, 2)\n",
+    "    cv2.rectangle(img, (int(team_2['box'][0]), int(team_2['box'][1])), (int(team_2['box'][2]), int(team_2['box'][3])), color, 2)\n",
+    "    cv2.rectangle(img, (x1,y1), (x2,y2), color, 2)\n",
+    "    \n",
+    "    cv2.imshow('Match',img)\n",
+    "    cv2.waitKey(0)\n",
+    "    cv2.destroyAllWindows()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "318ea052",
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [],
+   "source": [
+    "if __name__ == \"__main__\":\n",
+    "    model = YOLO(r\"E:\\vision_task\\vision_task\\best.pt\")\n",
+    "#     img =  r'E:\\vision_task\\vision_task\\test1.PNG'\n",
+    "#     img =  r'E:\\vision_task\\vision_task\\test3.jpg'\n",
+    "#     img =  r'E:\\vision_task\\vision_task\\test2.PNG'\n",
+    "    \n",
+    "    color = (255, 0, 0) \n",
+    "    annotate_image(img, model , color)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ba8b1eb0",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.9.12"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
